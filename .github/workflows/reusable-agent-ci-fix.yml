@@ -1,0 +1,115 @@
+name: Reusable - Agent CI Fix
+
+on:
+  workflow_call:
+    inputs:
+      pr-number:
+        required: true
+        type: number
+      attempt:
+        required: true
+        type: number
+      error-log:
+        required: true
+        type: string
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+concurrency:
+  group: agent-ci-fix-${{ github.repository }}-${{ inputs.pr-number }}
+  cancel-in-progress: false
+
+env:
+  PR_NUMBER: ${{ inputs.pr-number }}
+  ATTEMPT: ${{ inputs.attempt }}
+  ERROR_LOG: ${{ inputs.error-log }}
+
+jobs:
+  ci-fix:
+    runs-on: agent-runner
+    steps:
+      - name: Escalate if too many attempts
+        if: inputs.attempt > 3
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: Number(process.env.PR_NUMBER),
+              body: '**Agent CI Fix: Escalating to human.** Failed after 3 auto-fix attempts.'
+            });
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: Number(process.env.PR_NUMBER),
+              labels: ['needs-human']
+            });
+            core.setFailed('Escalated after 3 attempts');
+
+      - uses: actions/checkout@v4
+        if: inputs.attempt <= 3
+        with:
+          fetch-depth: 0
+
+      - name: Checkout PR branch
+        if: inputs.attempt <= 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr checkout "$PR_NUMBER"
+
+      - name: Infinite loop detection
+        if: inputs.attempt <= 3
+        run: |
+          COMMITS_LAST_HOUR=$(git log --since="1 hour ago" --oneline --author="github-actions" 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$COMMITS_LAST_HOUR" -gt 6 ]; then
+            echo "INFINITE_LOOP=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Abort on infinite loop
+        if: inputs.attempt <= 3 && env.INFINITE_LOOP == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: Number(process.env.PR_NUMBER),
+              body: '**Agent CI Fix: Infinite loop detected.** >6 commits in the last hour. Stopping.'
+            });
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: Number(process.env.PR_NUMBER),
+              labels: ['needs-human']
+            });
+            core.setFailed('Infinite loop detected');
+
+      - name: Fix CI errors with Haiku
+        if: inputs.attempt <= 3 && env.INFINITE_LOOP != 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: claude-haiku-4-5-20251001
+          max_turns: 20
+          timeout_minutes: 10
+          prompt: |
+            You are a CI fix agent at VerXus.
+
+            The CI pipeline failed for PR (number in env PR_NUMBER), attempt (in env ATTEMPT).
+
+            Error log is in env ERROR_LOG. Read it carefully.
+
+            1. Identify the root cause of the CI failure
+            2. Fix the code - do NOT just suppress errors
+            3. Run the build/test commands to verify the fix
+            4. Keep changes minimal and focused on the error
+
+      - name: Push fix
+        if: inputs.attempt <= 3 && env.INFINITE_LOOP != 'true'
+        run: |
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "agent: ci fix attempt ${ATTEMPT}"
+            git push
+          else
+            echo "No changes to push"
+          fi

@@ -1,0 +1,37 @@
+name: Validate Workflows
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+
+jobs:
+  validate:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install linters
+        run: |
+          pip install yamllint -q 2>/dev/null || true
+          which actionlint >/dev/null 2>&1 || {
+            ARCH=$(uname -m)
+            OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+            case "$ARCH" in
+              x86_64) ARCH="amd64" ;;
+              aarch64|arm64) ARCH="arm64" ;;
+            esac
+            curl -sL "https://github.com/rhysd/actionlint/releases/latest/download/actionlint_$(curl -sL https://api.github.com/repos/rhysd/actionlint/releases/latest | jq -r .tag_name | sed 's/^v//')_${OS}_${ARCH}.tar.gz" | tar xz -C /usr/local/bin actionlint 2>/dev/null || echo "actionlint install failed, will skip"
+          }
+
+      - name: yamllint
+        run: |
+          yamllint -d "{extends: default, rules: {line-length: {max: 200}, truthy: disable}}" .github/workflows/*.yml
+
+      - name: actionlint
+        run: |
+          if which actionlint >/dev/null 2>&1; then
+            actionlint .github/workflows/*.yml
+          else
+            echo "actionlint not available, skipping"
+          fi

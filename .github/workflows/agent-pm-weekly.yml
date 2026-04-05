@@ -1,0 +1,72 @@
+name: Agent PM - Weekly Report
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+jobs:
+  weekly:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gather weekly Linear data
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+        run: |
+          WEEK_AGO=$(date -d "7 days ago" +%Y-%m-%d 2>/dev/null || date -v-7d +%Y-%m-%d)
+          curl -sf -X POST https://api.linear.app/graphql \
+            -H "Authorization: $LINEAR_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\":\"{ issues(filter: { updatedAt: { gte: \\\"${WEEK_AGO}T00:00:00Z\\\" } }) { nodes { identifier title state { name } assignee { name } createdAt completedAt } } }\"}" \
+            -o /tmp/linear-weekly.json || echo '{"data":{"issues":{"nodes":[]}}}' > /tmp/linear-weekly.json
+
+      - name: Gather weekly GitHub data
+        env:
+          GH_TOKEN: ${{ secrets.ORG_GITHUB_TOKEN }}
+        run: |
+          WEEK_AGO=$(date -d "7 days ago" +%Y-%m-%d 2>/dev/null || date -v-7d +%Y-%m-%d)
+          gh api graphql -f query="
+            {
+              search(query: \"org:verxus updated:>=${WEEK_AGO}\", type: ISSUE, first: 100) {
+                nodes {
+                  ... on Issue { number title state repository { name } labels(first:10) { nodes { name } } }
+                  ... on PullRequest { number title state repository { name } merged additions deletions }
+                }
+              }
+            }
+          " > /tmp/github-weekly.json 2>/dev/null || echo '{"data":{"search":{"nodes":[]}}}' > /tmp/github-weekly.json
+
+      - name: Generate weekly report with Opus
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: claude-opus-4-6
+          max_turns: 10
+          timeout_minutes: 10
+          prompt: |
+            You are a PM assistant at VerXus generating a weekly engineering report.
+
+            Read these data files:
+            - /tmp/linear-weekly.json (Linear issues from past week)
+            - /tmp/github-weekly.json (GitHub activity from past week)
+
+            Generate a weekly report with these sections:
+            - **Summary**: High-level overview of the week
+            - **Shipped**: Features/fixes merged to main
+            - **In Progress**: Ongoing work
+            - **Metrics**: PRs merged count, issues closed count, lines changed
+            - **Agent Productivity**: Agent-generated PRs merged vs created, fix rate
+            - **Next Week**: Known upcoming work from open issues
+
+            Format as Slack-compatible markdown. Write to /tmp/weekly-report.md
+
+      - name: Post to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          [ -z "$SLACK_WEBHOOK_URL" ] && exit 0
+          REPORT=$(cat /tmp/weekly-report.md 2>/dev/null || echo "Weekly report generation failed.")
+          PAYLOAD=$(jq -n --arg text "$REPORT" '{"text": $text}')
+          curl -sf -X POST "$SLACK_WEBHOOK_URL" -H 'Content-Type: application/json' -d "$PAYLOAD" || true

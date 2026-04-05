@@ -1,0 +1,38 @@
+name: Bootstrap Labels
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bootstrap:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create labels across repos
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ ! -f config/labels.json ] || [ ! -f config/repos.json ]; then
+            echo "Missing config/labels.json or config/repos.json"
+            exit 1
+          fi
+
+          REPOS=$(jq -r '.[]' config/repos.json)
+          LABELS=$(jq -c '.[]' config/labels.json)
+
+          for repo in $REPOS; do
+            echo "Processing repo: $repo"
+            echo "$LABELS" | while IFS= read -r label; do
+              NAME=$(echo "$label" | jq -r '.name')
+              COLOR=$(echo "$label" | jq -r '.color')
+              DESC=$(echo "$label" | jq -r '.description // ""')
+              gh label create "$NAME" \
+                --repo "$repo" \
+                --color "$COLOR" \
+                --description "$DESC" \
+                --force 2>/dev/null || echo "  Warning: could not create label '$NAME' in $repo"
+            done
+            echo "  Done: $repo"
+          done
+          echo "Label bootstrap complete"

@@ -1,0 +1,184 @@
+name: Reusable - Agent Review
+
+on:
+  workflow_call:
+    inputs:
+      pr-number:
+        required: true
+        type: number
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      SLACK_WEBHOOK_URL:
+        required: false
+
+concurrency:
+  group: agent-review-${{ github.repository }}-${{ inputs.pr-number }}
+  cancel-in-progress: true
+
+env:
+  PR_NUMBER: ${{ inputs.pr-number }}
+
+jobs:
+  code-review:
+    runs-on: agent-runner
+    outputs:
+      result: ${{ steps.result.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Code review with Opus
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: claude-opus-4-6
+          max_turns: 15
+          timeout_minutes: 15
+          prompt: |
+            You are a senior code reviewer at VerXus.
+
+            Review PR using gh CLI (PR number is in env PR_NUMBER):
+            gh pr diff "$PR_NUMBER"
+            gh pr view "$PR_NUMBER"
+
+            Check for:
+            - Code quality and readability
+            - Pattern consistency with existing codebase
+            - Edge cases and error handling
+            - Null/undefined checks
+            - Missing input validation
+            - Resource leaks
+            - Performance concerns
+
+            Write your review to /tmp/code-review.md
+            At the end, write PASS or FAIL to /tmp/code-review-result.txt
+
+      - name: Set result
+        id: result
+        run: |
+          RESULT=$(cat /tmp/code-review-result.txt 2>/dev/null || echo "FAIL")
+          echo "result=$RESULT" >> "$GITHUB_OUTPUT"
+
+      - name: Comment review
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const review = fs.existsSync('/tmp/code-review.md')
+              ? fs.readFileSync('/tmp/code-review.md', 'utf8')
+              : 'Code review did not produce output.';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: Number(process.env.PR_NUMBER),
+              body: `## Code Review\n${review}`
+            });
+
+  security-review:
+    runs-on: agent-runner
+    outputs:
+      result: ${{ steps.result.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: npm audit
+        run: |
+          npm audit --json > /tmp/npm-audit.json 2>/dev/null || true
+
+      - name: TruffleHog scan
+        uses: trufflesecurity/trufflehog@main
+        continue-on-error: true
+        with:
+          extra_args: --only-verified --diff
+
+      - name: Security review with Opus
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: claude-opus-4-6
+          max_turns: 15
+          timeout_minutes: 15
+          prompt: |
+            You are a security reviewer at VerXus.
+
+            Review the PR for security (PR number is in env PR_NUMBER):
+            gh pr diff "$PR_NUMBER"
+
+            Also read these scan results if they exist:
+            - /tmp/npm-audit.json
+
+            Check for OWASP Top 10 issues:
+            - Injection (SQL, NoSQL, command)
+            - Broken auth/access control
+            - Secrets/credentials in code
+            - PII logging
+            - Unpinned dependencies
+            - XSS, CSRF
+            - Insecure deserialization
+            - Missing rate limiting on new endpoints
+
+            Write your review to /tmp/security-review.md
+            At the end, write PASS or FAIL to /tmp/security-review-result.txt
+
+      - name: Set result
+        id: result
+        run: |
+          RESULT=$(cat /tmp/security-review-result.txt 2>/dev/null || echo "FAIL")
+          echo "result=$RESULT" >> "$GITHUB_OUTPUT"
+
+      - name: Comment review
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const review = fs.existsSync('/tmp/security-review.md')
+              ? fs.readFileSync('/tmp/security-review.md', 'utf8')
+              : 'Security review did not produce output.';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: Number(process.env.PR_NUMBER),
+              body: `## Security Review\n${review}`
+            });
+
+  gate:
+    needs: [code-review, security-review]
+    runs-on: agent-runner
+    env:
+      CODE_RESULT: ${{ needs.code-review.outputs.result }}
+      SEC_RESULT: ${{ needs.security-review.outputs.result }}
+    steps:
+      - name: Check results
+        run: |
+          echo "Code review: $CODE_RESULT"
+          echo "Security review: $SEC_RESULT"
+          if [ "$CODE_RESULT" != "PASS" ] || [ "$SEC_RESULT" != "PASS" ]; then
+            echo "One or more reviews failed"
+            exit 1
+          fi
+
+      - name: Update labels
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = Number(process.env.PR_NUMBER);
+            try { await github.rest.issues.removeLabel({ owner: context.repo.owner, repo: context.repo.repo, issue_number: pr, name: 'status/security-review' }); } catch(e) {}
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: pr,
+              labels: ['status/review-passed']
+            });
+
+      - name: Dispatch review-passed
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createDispatchEvent({
+              owner: context.repo.owner, repo: context.repo.repo,
+              event_type: 'review-passed',
+              client_payload: { pr_number: Number(process.env.PR_NUMBER) }
+            });

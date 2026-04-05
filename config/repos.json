@@ -1,0 +1,43 @@
+{
+  "api": {
+    "type": "backend",
+    "defaultBranch": "main",
+    "preview": "docker",
+    "buildCmd": "npm run build",
+    "testCmd": "npm run test",
+    "typecheckCmd": "npm run typecheck",
+    "forbiddenPaths": ["Dockerfile", "docker-compose", ".github/workflows/", ".env", "src/migrations/", "deploy/"],
+    "improveCron": "0 8 * * *"
+  },
+  "frontend": {
+    "type": "frontend",
+    "defaultBranch": "main",
+    "preview": "s3",
+    "previewBucket": "poc.app.verxus.io",
+    "buildCmd": "npm run build",
+    "testCmd": "npm run lint",
+    "typecheckCmd": "npm run type-check",
+    "forbiddenPaths": [".github/workflows/", ".env", "vite.config.ts"],
+    "improveCron": "30 8 * * *"
+  },
+  "social-service": {
+    "type": "fullstack",
+    "defaultBranch": "master",
+    "preview": "test-only",
+    "buildCmd": "npm run build",
+    "testCmd": "npm run test",
+    "typecheckCmd": "npx tsc --noEmit",
+    "forbiddenPaths": ["Dockerfile", "docker-compose", ".github/workflows/", ".env", "prisma/migrations/"],
+    "improveCron": "0 14 * * *"
+  },
+  "telegram-service": {
+    "type": "fullstack",
+    "defaultBranch": "main",
+    "preview": "test-only",
+    "buildCmd": "bun run typecheck",
+    "testCmd": "cd web && npm run typecheck",
+    "typecheckCmd": "bun run typecheck",
+    "forbiddenPaths": ["Dockerfile", "docker-compose", ".github/workflows/", ".env", "drizzle/", "src/db/schema.ts"],
+    "improveCron": "30 14 * * *"
+  }
+}

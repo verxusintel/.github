@@ -1,0 +1,123 @@
+name: Reusable - Agent QA
+
+on:
+  workflow_call:
+    inputs:
+      pr-number:
+        required: true
+        type: number
+      preview-strategy:
+        required: true
+        type: string
+        description: "s3, docker, or test-only"
+      build-cmd:
+        required: true
+        type: string
+      test-cmd:
+        required: true
+        type: string
+      preview-bucket:
+        required: false
+        type: string
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+
+concurrency:
+  group: agent-qa-${{ github.repository }}-${{ inputs.pr-number }}
+  cancel-in-progress: true
+
+env:
+  PR_NUMBER: ${{ inputs.pr-number }}
+  PREVIEW_STRATEGY: ${{ inputs.preview-strategy }}
+  BUILD_CMD: ${{ inputs.build-cmd }}
+  TEST_CMD: ${{ inputs.test-cmd }}
+  PREVIEW_BUCKET: ${{ inputs.preview-bucket }}
+
+jobs:
+  qa:
+    runs-on: agent-runner
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout PR branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr checkout "$PR_NUMBER"
+
+      - name: Generate tests with Haiku
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: claude-haiku-4-5-20251001
+          max_turns: 15
+          timeout_minutes: 10
+          prompt: |
+            You are a QA engineer at VerXus.
+
+            Review the diff for the PR (PR number is in env PR_NUMBER):
+            gh pr diff "$PR_NUMBER"
+
+            Generate comprehensive tests for the changed code:
+            - Unit tests for new functions/methods
+            - Edge case tests
+            - Integration tests if new endpoints/routes
+
+            Follow existing test patterns in the repo.
+            Run build: use env BUILD_CMD
+            Run tests: use env TEST_CMD
+
+      - name: Run test suite
+        run: |
+          eval "$TEST_CMD"
+
+      - name: Deploy S3 preview
+        if: env.PREVIEW_STRATEGY == 's3' && env.PREVIEW_BUCKET != ''
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          eval "$BUILD_CMD"
+          aws s3 sync dist/ "s3://${PREVIEW_BUCKET}/preview/pr-${PR_NUMBER}/" --delete
+
+      - name: Comment preview URL
+        if: env.PREVIEW_STRATEGY == 's3' && env.PREVIEW_BUCKET != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const bucket = process.env.PREVIEW_BUCKET;
+            const pr = process.env.PR_NUMBER;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: Number(pr),
+              body: `## Preview Deployed\nURL: https://${bucket}.s3.amazonaws.com/preview/pr-${pr}/index.html`
+            });
+
+      - name: Update labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = Number(process.env.PR_NUMBER);
+            try { await github.rest.issues.removeLabel({ owner: context.repo.owner, repo: context.repo.repo, issue_number: pr, name: 'status/qa' }); } catch(e) {}
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: pr,
+              labels: ['status/ready-for-review']
+            });
+
+      - name: Dispatch qa-passed
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createDispatchEvent({
+              owner: context.repo.owner, repo: context.repo.repo,
+              event_type: 'qa-passed',
+              client_payload: { pr_number: Number(process.env.PR_NUMBER) }
+            });

@@ -1,0 +1,23 @@
+[
+  {"name": "agent-generated", "color": "7C3AED", "description": "Created by AI agent"},
+  {"name": "agent", "color": "7C3AED", "description": "Trigger: assign to AI agent"},
+  {"name": "type/bug", "color": "D73A49", "description": "Bug fix"},
+  {"name": "type/feature", "color": "0E8A16", "description": "New feature"},
+  {"name": "type/improvement", "color": "FBCA04", "description": "Enhancement to existing feature"},
+  {"name": "type/security", "color": "B60205", "description": "Security fix"},
+  {"name": "type/performance", "color": "5319E7", "description": "Performance improvement"},
+  {"name": "priority/critical", "color": "B60205", "description": "Must fix immediately"},
+  {"name": "priority/high", "color": "D93F0B", "description": "Fix within 24h"},
+  {"name": "priority/medium", "color": "FBCA04", "description": "Fix within 1 week"},
+  {"name": "priority/low", "color": "0075CA", "description": "Fix when possible"},
+  {"name": "status/coding", "color": "BFD4F2", "description": "Agent is implementing"},
+  {"name": "status/security-review", "color": "F9D0C4", "description": "Awaiting security review"},
+  {"name": "status/qa-testing", "color": "C2E0C6", "description": "Awaiting QA validation"},
+  {"name": "status/ready-for-review", "color": "0E8A16", "description": "Ready for human review"},
+  {"name": "status/stale", "color": "808080", "description": "No activity >48h"},
+  {"name": "status/blocked", "color": "D93F0B", "description": "Blocked by dependency"},
+  {"name": "status/decomposed", "color": "C5DEF5", "description": "Broken into sub-issues"},
+  {"name": "status/ambiguous", "color": "E4E669", "description": "Needs clarification"},
+  {"name": "pm/needs-triage", "color": "FBCA04", "description": "PM needs to triage"},
+  {"name": "pm/needs-review", "color": "0E8A16", "description": "PM flagged for review"}
+]

@@ -1,0 +1,309 @@
+name: Reusable - Coding Agent
+
+on:
+  workflow_call:
+    inputs:
+      issue-number:
+        required: true
+        type: number
+      issue-title:
+        required: true
+        type: string
+      issue-body:
+        required: true
+        type: string
+      repo-type:
+        required: true
+        type: string
+      build-cmd:
+        required: true
+        type: string
+      test-cmd:
+        required: true
+        type: string
+      forbidden-paths:
+        required: true
+        type: string
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      SLACK_WEBHOOK_URL:
+        required: false
+
+concurrency:
+  group: agent-coding-${{ github.repository }}-${{ inputs.issue-number }}
+  cancel-in-progress: false
+
+env:
+  ISSUE_NUMBER: ${{ inputs.issue-number }}
+  ISSUE_TITLE: ${{ inputs.issue-title }}
+  ISSUE_BODY: ${{ inputs.issue-body }}
+  REPO_TYPE: ${{ inputs.repo-type }}
+  BUILD_CMD: ${{ inputs.build-cmd }}
+  TEST_CMD: ${{ inputs.test-cmd }}
+  FORBIDDEN_PATHS: ${{ inputs.forbidden-paths }}
+
+jobs:
+  plan:
+    runs-on: agent-runner
+    outputs:
+      subtasks: ${{ steps.parse.outputs.subtasks }}
+      spec: ${{ steps.parse.outputs.spec }}
+      complexity: ${{ steps.parse.outputs.complexity }}
+      status: ${{ steps.parse.outputs.status }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add status labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: Number(process.env.ISSUE_NUMBER),
+              labels: ['status/coding', 'agent-generated']
+            });
+
+      - name: Plan with Opus
+        id: planner
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: claude-opus-4-6
+          max_turns: 20
+          timeout_minutes: 15
+          prompt: |
+            You are the PLANNER for an autonomous coding team at VerXus.
+
+            ## Issue
+            Read the GitHub issue from the environment. Issue number is in env ISSUE_NUMBER.
+            Use gh CLI to read the full issue: gh issue view $ISSUE_NUMBER
+
+            ## Repo type from env REPO_TYPE
+            ## Build cmd from env BUILD_CMD
+            ## Test cmd from env TEST_CMD
+            ## Forbidden files from env FORBIDDEN_PATHS
+
+            ## Instructions
+            1. Read SPECS.md if it exists for repo context
+            2. Explore the codebase to understand relevant code
+            3. If the issue is vague, set status=AMBIGUOUS and list questions
+            4. Classify: L1 (<50 lines), L2 (50-500), L3 (>500)
+            5. If L3: set status=L3-DECOMPOSE (max 5 sub-issues)
+            6. If L1/L2: set status=READY with subtasks
+            7. Search for EXISTING utilities to reuse
+            8. If any subtask needs destructive DB ops, set needs_human=true
+            9. NEVER plan destructive migrations (DROP, DELETE FROM, TRUNCATE)
+
+            Write valid JSON to /tmp/plan.json
+
+      - name: Parse plan
+        id: parse
+        if: always()
+        run: |
+          if [ -f /tmp/plan.json ]; then
+            STATUS=$(jq -r '.status // "READY"' /tmp/plan.json)
+            SUBTASKS=$(jq -c '.subtasks // []' /tmp/plan.json)
+            SPEC=$(jq -r '.spec // ""' /tmp/plan.json | head -c 500)
+            COMPLEXITY=$(jq -r '.complexity // "L2"' /tmp/plan.json)
+          else
+            STATUS="READY"
+            SUBTASKS='[{"id":"1","title":"implement issue","instructions":"implement as described","acceptance":"build passes","files":[],"existing_utils":[],"needs_human":false}]'
+            SPEC="implement the issue"
+            COMPLEXITY="L2"
+          fi
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "subtasks=$SUBTASKS" >> "$GITHUB_OUTPUT"
+          echo "spec=$SPEC" >> "$GITHUB_OUTPUT"
+          echo "complexity=$COMPLEXITY" >> "$GITHUB_OUTPUT"
+
+      - name: Handle ambiguous
+        if: steps.parse.outputs.status == 'AMBIGUOUS'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const num = Number(process.env.ISSUE_NUMBER);
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: num,
+              body: '**Agent needs clarification.** Please update the issue with more details and re-apply the `agent` label.'
+            });
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: num, name: 'agent'
+            }).catch(() => {});
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: num, labels: ['status/ambiguous']
+            });
+
+      - name: Auto-decompose L3
+        if: steps.parse.outputs.status == 'L3-DECOMPOSE'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const plan = JSON.parse(require('fs').readFileSync('/tmp/plan.json', 'utf8'));
+            const parentNumber = Number(process.env.ISSUE_NUMBER);
+            if (plan.subtasks.length > 5) { core.setFailed('Max 5 sub-issues'); return; }
+            const nums = [];
+            for (const st of plan.subtasks) {
+              const { data: sub } = await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title: `[Sub] ${process.env.ISSUE_TITLE} - Part ${st.id}: ${st.title}`,
+                body: `Parent: #${parentNumber}\n\n## Spec\n${st.instructions}\n\n## Acceptance\n${st.acceptance}`,
+                labels: ['agent', 'agent-generated', ...(plan.inherited_labels || [])]
+              });
+              nums.push(sub.number);
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: parentNumber,
+              body: `## Auto-Decomposition\nClassified as L3. Sub-issues:\n${nums.map((n, i) => `- #${n} — ${plan.subtasks[i].title}`).join('\n')}`
+            });
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: parentNumber, labels: ['status/decomposed']
+            });
+
+  execute:
+    needs: plan
+    if: needs.plan.outputs.status == 'READY'
+    runs-on: agent-runner
+    strategy:
+      matrix:
+        subtask: ${{ fromJson(needs.plan.outputs.subtasks) }}
+      max-parallel: 3
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup branch
+        run: |
+          BRANCH="agent/issue-${ISSUE_NUMBER}"
+          git checkout -b "$BRANCH" 2>/dev/null || git checkout "$BRANCH" 2>/dev/null || true
+
+      - name: Implement subtask (Haiku)
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: claude-haiku-4-5-20251001
+          max_turns: 30
+          timeout_minutes: 20
+          allowed_tools: |
+            Bash(git:*)
+            Bash(npm:*)
+            Bash(npx:*)
+            Bash(bun:*)
+            Bash(node:*)
+            Read
+            Write
+            Edit
+            Glob
+            Grep
+          prompt: |
+            Implement this subtask: ${{ matrix.subtask.title }}
+            Instructions: ${{ matrix.subtask.instructions }}
+            Acceptance: ${{ matrix.subtask.acceptance }}
+            Build cmd from env BUILD_CMD. Test cmd from env TEST_CMD.
+            Forbidden files from env FORBIDDEN_PATHS.
+            NEVER write destructive migrations. NEVER log PII. Use exact dep versions.
+            Run build before finishing.
+
+      - name: Self-check (Haiku)
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: claude-haiku-4-5-20251001
+          max_turns: 5
+          timeout_minutes: 3
+          prompt: |
+            SELF-CHECK. Acceptance: ${{ matrix.subtask.acceptance }}
+            Verify all criteria met, build passes, no forbidden files touched, no destructive ops. Fix issues.
+
+      - name: Commit
+        run: |
+          git add -A
+          git diff --cached --quiet || git commit -m "agent: subtask ${{ matrix.subtask.id }} - ${{ matrix.subtask.title }}"
+
+  finalize:
+    needs: [plan, execute]
+    if: needs.plan.outputs.status == 'READY' && needs.execute.result == 'success'
+    runs-on: agent-runner
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push branch
+        run: |
+          BRANCH="agent/issue-${ISSUE_NUMBER}"
+          git checkout "$BRANCH" 2>/dev/null || true
+          git push origin "$BRANCH" --force-with-lease 2>/dev/null || git push origin "$BRANCH"
+
+      - name: Create PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SPEC: ${{ needs.plan.outputs.spec }}
+          COMPLEXITY: ${{ needs.plan.outputs.complexity }}
+        run: |
+          BRANCH="agent/issue-${ISSUE_NUMBER}"
+          gh pr create \
+            --title "agent: #${ISSUE_NUMBER} - ${ISSUE_TITLE}" \
+            --body "$(cat <<EOF
+          ## Summary
+          ${SPEC}
+
+          ## Complexity: ${COMPLEXITY}
+          Closes #${ISSUE_NUMBER}
+
+          ---
+          *Generated by VerXus Agent Pipeline*
+          EOF
+          )" \
+            --head "$BRANCH" \
+            --label agent-generated \
+            --label status/security-review 2>/dev/null || echo "PR may already exist"
+
+      - name: Dispatch review
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prs = await github.rest.pulls.list({
+              owner: context.repo.owner, repo: context.repo.repo,
+              head: `${context.repo.owner}:agent/issue-${process.env.ISSUE_NUMBER}`,
+              state: 'open'
+            });
+            if (prs.data.length > 0) {
+              await github.rest.repos.createDispatchEvent({
+                owner: context.repo.owner, repo: context.repo.repo,
+                event_type: 'agent-pr-ready',
+                client_payload: { pr_number: prs.data[0].number }
+              });
+            }
+
+  notify:
+    needs: [plan, finalize]
+    if: always()
+    runs-on: agent-runner
+    steps:
+      - name: Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RESULT: ${{ needs.finalize.result }}
+          COMPLEXITY: ${{ needs.plan.outputs.complexity }}
+          STATUS: ${{ needs.plan.outputs.status }}
+        run: |
+          [ -z "$SLACK_WEBHOOK_URL" ] && exit 0
+          MSG="Agent Task ${RESULT:-$STATUS}: ${{ github.repository }} #${ISSUE_NUMBER} (${COMPLEXITY})"
+          curl -sf -X POST "$SLACK_WEBHOOK_URL" -H 'Content-Type: application/json' -d "{\"text\":\"$MSG\"}" || true
+
+      - name: Cleanup labels
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try { await github.rest.issues.removeLabel({ owner: context.repo.owner, repo: context.repo.repo, issue_number: Number(process.env.ISSUE_NUMBER), name: 'status/coding' }); } catch(e) {}
