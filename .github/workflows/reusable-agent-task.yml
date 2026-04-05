@@ -209,17 +209,6 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_args: "--model claude-haiku-4-5-20251001 --max-turns 15"
-          allowed_tools: |
-            Bash(git:*)
-            Bash(npm:*)
-            Bash(npx:*)
-            Bash(bun:*)
-            Bash(node:*)
-            Read
-            Write
-            Edit
-            Glob
-            Grep
           prompt: |
             Implement this subtask: ${{ matrix.subtask.title }}
             Instructions: ${{ matrix.subtask.instructions }}
