@@ -54,9 +54,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          model: claude-haiku-4-5-20251001
-          max_turns: 25
-          timeout_minutes: 15
+          claude_args: "--model claude-haiku-4-5-20251001 --max-turns 30"
           prompt: |
             You are a proactive improvement agent at VerXus.
 
