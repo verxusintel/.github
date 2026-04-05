@@ -122,9 +122,10 @@ async function handleSlackEvent(event: SlackEvent): Promise<Response> {
       if (env.LINEAR_API_KEY) {
         try {
           linearResult = await createLinearIssue(
-            { title: classification.title, description: classification.description, priority: classification.priority },
+            { title: classification.title, description: classification.description, priority: classification.priority, type: classification.type },
             env.LINEAR_API_KEY
           );
+          if (linearResult) console.log(`Linear issue created: ${linearResult.id}`);
         } catch (err) {
           console.error("Linear failed:", err);
         }

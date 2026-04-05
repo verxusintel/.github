@@ -1,0 +1,35 @@
+{
+  "teamId": "3666d5d2-1362-4d0d-8fbe-6e475ec9aa6b",
+  "teamKey": "VER",
+  "states": {
+    "backlog": "9966a83f-7172-47c1-8531-7f483d0fb8d8",
+    "todo": "38fb7897-2a2b-4246-8915-0e73be64268c",
+    "in_progress": "d2eac226-eb3a-4572-8587-a895e4930a6b",
+    "in_review": "271d8187-a0e4-497b-bf55-b69a1b94afe7",
+    "done": "526fabd3-2ec0-4baf-8a54-676ae21eafcd",
+    "canceled": "34bdbdac-ff05-4f13-a2c9-181a7f530e70"
+  },
+  "labels": {
+    "bug": "f8da8766-7212-4020-a3da-6d3349dab916",
+    "feature": "1e707294-988b-4b67-a690-f3838240bd42",
+    "improvement": "168224cc-2455-4978-b5c5-b0b8040214d0",
+    "security": "c816b836-ac13-4204-8a24-f908234f7575",
+    "infrastructure": "f1a75e4b-3499-4d73-8c59-6a2156df6304",
+    "research": "f5c023a9-1aa6-436c-b9ad-88a7a7eb28d2",
+    "refactor": "1d90813a-670e-41bf-88f2-bc71480cc6ec",
+    "blocker": "5f983bee-281a-4d0b-82b9-f4b9ab80d339",
+    "devtooling": "d42d2895-2c47-4455-9990-4663d8e9a59c"
+  },
+  "members": {
+    "joao": "ed43fec5-f0b5-425c-82eb-907c2770fa48",
+    "murilo": "41582af6-66e2-4817-ab1a-e4483a6440c8",
+    "gustavo": "3b0e3553-fc93-4fe2-9be7-bf530ce57b35"
+  },
+  "pipelineMapping": {
+    "issue_created": "todo",
+    "agent_coding": "in_progress",
+    "pr_opened": "in_review",
+    "pr_merged": "done",
+    "agent_failed": "backlog"
+  }
+}
