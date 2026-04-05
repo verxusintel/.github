@@ -44,13 +44,8 @@ env:
   FORBIDDEN_PATHS: ${{ inputs.forbidden-paths }}
 
 jobs:
-  plan:
+  implement:
     runs-on: agent-runner
-    outputs:
-      subtasks: ${{ steps.parse.outputs.subtasks }}
-      spec: ${{ steps.parse.outputs.spec }}
-      complexity: ${{ steps.parse.outputs.complexity }}
-      status: ${{ steps.parse.outputs.status }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -66,207 +61,56 @@ jobs:
               labels: ['status/coding', 'agent-generated']
             });
 
-      - name: Prepare context
-        id: context
-        run: |
-          # Read SPECS.md for quick context (avoid expensive codebase exploration)
-          if [ -f SPECS.md ]; then
-            SPECS=$(head -100 SPECS.md)
-          else
-            SPECS="No SPECS.md found"
-          fi
-          echo "specs<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$SPECS" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-
-          # Quick file listing for relevant dirs
-          STRUCTURE=$(find src -type f -name "*.ts" -o -name "*.tsx" 2>/dev/null | head -50 || echo "no src dir")
-          echo "structure<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$STRUCTURE" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-
-      - name: Plan with Opus
-        id: planner
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          claude_args: "--model claude-opus-4-6 --max-turns 15"
-          prompt: |
-            You are the PLANNER. Be fast and focused — do NOT explore the entire codebase.
-
-            ## Issue #${{ env.ISSUE_NUMBER }}: ${{ env.ISSUE_TITLE }}
-            ${{ env.ISSUE_BODY }}
-
-            ## Repo: ${{ env.REPO_TYPE }} | Build: ${{ env.BUILD_CMD }} | Test: ${{ env.TEST_CMD }}
-            ## Forbidden: ${{ env.FORBIDDEN_PATHS }}
-
-            ## SPECS.md (read this instead of exploring)
-            ${{ steps.context.outputs.specs }}
-
-            ## File structure
-            ${{ steps.context.outputs.structure }}
-
-            ## Instructions (be quick, max 10 turns)
-            1. Based on SPECS.md and file structure, identify the 1-3 files to change
-            2. If issue is vague: status=AMBIGUOUS
-            3. Classify: L1 (<50 lines), L2 (50-200), L3 (>200 → decompose)
-            4. Write ONE focused subtask with exact file paths and instructions
-            5. NEVER explore the whole codebase. Use SPECS.md for context.
-            6. NEVER plan destructive migrations
-
-            Write JSON to /tmp/plan.json:
-            {"status":"READY","complexity":"L1","estimated_lines":30,"spec":"...","subtasks":[{"id":"1","title":"...","files":["src/..."],"instructions":"...","acceptance":"build passes"}]}
-
-      - name: Parse plan
-        id: parse
-        if: always()
-        run: |
-          if [ -f /tmp/plan.json ]; then
-            STATUS=$(jq -r '.status // "READY"' /tmp/plan.json)
-            SUBTASKS=$(jq -c '.subtasks // []' /tmp/plan.json)
-            SPEC=$(jq -r '.spec // ""' /tmp/plan.json | head -c 500)
-            COMPLEXITY=$(jq -r '.complexity // "L2"' /tmp/plan.json)
-          else
-            STATUS="READY"
-            SUBTASKS='[{"id":"1","title":"implement issue","instructions":"implement as described","acceptance":"build passes","files":[],"existing_utils":[],"needs_human":false}]'
-            SPEC="implement the issue"
-            COMPLEXITY="L2"
-          fi
-          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
-          echo "subtasks=$SUBTASKS" >> "$GITHUB_OUTPUT"
-          echo "spec=$SPEC" >> "$GITHUB_OUTPUT"
-          echo "complexity=$COMPLEXITY" >> "$GITHUB_OUTPUT"
-
-      - name: Handle ambiguous
-        if: steps.parse.outputs.status == 'AMBIGUOUS'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const num = Number(process.env.ISSUE_NUMBER);
-            await github.rest.issues.createComment({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: num,
-              body: '**Agent needs clarification.** Please update the issue with more details and re-apply the `agent` label.'
-            });
-            await github.rest.issues.removeLabel({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: num, name: 'agent'
-            }).catch(() => {});
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: num, labels: ['status/ambiguous']
-            });
-
-      - name: Auto-decompose L3
-        if: steps.parse.outputs.status == 'L3-DECOMPOSE'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const plan = JSON.parse(require('fs').readFileSync('/tmp/plan.json', 'utf8'));
-            const parentNumber = Number(process.env.ISSUE_NUMBER);
-            if (plan.subtasks.length > 5) { core.setFailed('Max 5 sub-issues'); return; }
-            const nums = [];
-            for (const st of plan.subtasks) {
-              const { data: sub } = await github.rest.issues.create({
-                owner: context.repo.owner, repo: context.repo.repo,
-                title: `[Sub] ${process.env.ISSUE_TITLE} - Part ${st.id}: ${st.title}`,
-                body: `Parent: #${parentNumber}\n\n## Spec\n${st.instructions}\n\n## Acceptance\n${st.acceptance}`,
-                labels: ['agent', 'agent-generated', ...(plan.inherited_labels || [])]
-              });
-              nums.push(sub.number);
-            }
-            await github.rest.issues.createComment({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: parentNumber,
-              body: `## Auto-Decomposition\nClassified as L3. Sub-issues:\n${nums.map((n, i) => `- #${n} — ${plan.subtasks[i].title}`).join('\n')}`
-            });
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: parentNumber, labels: ['status/decomposed']
-            });
-
-  execute:
-    needs: plan
-    if: needs.plan.outputs.status == 'READY'
-    runs-on: agent-runner
-    strategy:
-      matrix:
-        subtask: ${{ fromJson(needs.plan.outputs.subtasks) }}
-      max-parallel: 3
-      fail-fast: false
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup branch
+      - name: Create branch
         run: |
           BRANCH="agent/issue-${ISSUE_NUMBER}"
-          git checkout -b "$BRANCH" 2>/dev/null || git checkout "$BRANCH" 2>/dev/null || true
+          git checkout -b "$BRANCH"
 
-      - name: Implement subtask (Haiku)
+      - name: Implement (Claude Code)
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_args: "--model claude-haiku-4-5-20251001 --max-turns 15"
           prompt: |
-            Implement this subtask: ${{ matrix.subtask.title }}
-            Instructions: ${{ matrix.subtask.instructions }}
-            Acceptance: ${{ matrix.subtask.acceptance }}
-            Build cmd from env BUILD_CMD. Test cmd from env TEST_CMD.
-            Forbidden files from env FORBIDDEN_PATHS.
-            NEVER write destructive migrations. NEVER log PII. Use exact dep versions.
-            Run build before finishing.
+            Implement this task in the codebase.
 
-      - name: Self-check (Haiku)
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          claude_args: "--model claude-haiku-4-5-20251001 --max-turns 15"
-          prompt: |
-            SELF-CHECK. Acceptance: ${{ matrix.subtask.acceptance }}
-            Verify all criteria met, build passes, no forbidden files touched, no destructive ops. Fix issues.
+            ## Issue
+            Title: ${{ env.ISSUE_TITLE }}
+            Body: ${{ env.ISSUE_BODY }}
 
-      - name: Commit
-        run: |
-          git add -A
-          git diff --cached --quiet || git commit -m "agent: subtask ${{ matrix.subtask.id }} - ${{ matrix.subtask.title }}"
+            ## Context
+            Repo type: ${{ env.REPO_TYPE }}
+            Build: ${{ env.BUILD_CMD }}
+            Test: ${{ env.TEST_CMD }}
+            Forbidden files: ${{ env.FORBIDDEN_PATHS }}
 
-  finalize:
-    needs: [plan, execute]
-    if: needs.plan.outputs.status == 'READY' && needs.execute.result == 'success'
-    runs-on: agent-runner
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+            ## Rules
+            - Read SPECS.md first for project context
+            - Make focused, minimal changes
+            - Run the build command to verify before finishing
+            - NEVER modify forbidden files
+            - NEVER write destructive DB migrations (DROP, DELETE, TRUNCATE)
+            - NEVER log PII (emails, IPs, credentials)
+            - Use exact dependency versions (no ^ or ~)
+            - Commit your changes with message: "agent: implement #${{ env.ISSUE_NUMBER }}"
 
-      - name: Push branch
-        run: |
-          BRANCH="agent/issue-${ISSUE_NUMBER}"
-          git checkout "$BRANCH" 2>/dev/null || true
-          git push origin "$BRANCH" --force-with-lease 2>/dev/null || git push origin "$BRANCH"
-
-      - name: Create PR
+      - name: Push and create PR
         env:
           GH_TOKEN: ${{ github.token }}
-          SPEC: ${{ needs.plan.outputs.spec }}
-          COMPLEXITY: ${{ needs.plan.outputs.complexity }}
         run: |
           BRANCH="agent/issue-${ISSUE_NUMBER}"
+          # Commit any uncommitted changes
+          git add -A
+          git diff --cached --quiet || git commit -m "agent: implement #${ISSUE_NUMBER}"
+          # Push
+          git push origin "$BRANCH"
+          # Create PR
           gh pr create \
             --title "agent: #${ISSUE_NUMBER} - ${ISSUE_TITLE}" \
-            --body "$(cat <<EOF
-          ## Summary
-          ${SPEC}
-
-          ## Complexity: ${COMPLEXITY}
-          Closes #${ISSUE_NUMBER}
+            --body "Closes #${ISSUE_NUMBER}
 
           ---
-          *Generated by VerXus Agent Pipeline*
-          EOF
-          )" \
+          *Generated by VerXus Agent Pipeline*" \
             --head "$BRANCH" \
             --label agent-generated \
             --label status/security-review 2>/dev/null || echo "PR may already exist"
@@ -289,19 +133,17 @@ jobs:
             }
 
   notify:
-    needs: [plan, finalize]
+    needs: implement
     if: always()
     runs-on: agent-runner
     steps:
       - name: Slack
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          RESULT: ${{ needs.finalize.result }}
-          COMPLEXITY: ${{ needs.plan.outputs.complexity }}
-          STATUS: ${{ needs.plan.outputs.status }}
+          RESULT: ${{ needs.implement.result }}
         run: |
           [ -z "$SLACK_WEBHOOK_URL" ] && exit 0
-          MSG="Agent Task ${RESULT:-$STATUS}: ${{ github.repository }} #${ISSUE_NUMBER} (${COMPLEXITY})"
+          MSG="Agent Task ${RESULT}: ${{ github.repository }} #${ISSUE_NUMBER}"
           curl -sf -X POST "$SLACK_WEBHOOK_URL" -H 'Content-Type: application/json' -d "{\"text\":\"$MSG\"}" || true
 
       - name: Cleanup labels
