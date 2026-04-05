@@ -56,10 +56,16 @@ export async function classifyMessage(
     content: Array<{ type: string; text: string }>;
   };
 
-  const text = data.content?.[0]?.text;
-  if (!text) {
+  const rawText = data.content?.[0]?.text;
+  if (!rawText) {
     throw new Error("Empty response from Anthropic API");
   }
+
+  // Strip markdown code fences if present
+  const text = rawText
+    .replace(/```json\s*/gi, "")
+    .replace(/```\s*/g, "")
+    .trim();
 
   const classification = JSON.parse(text) as Classification;
 

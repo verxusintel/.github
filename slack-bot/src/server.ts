@@ -9,6 +9,9 @@ const DAILY_LIMIT = 10;
 let issueCount = 0;
 let lastResetDate = "";
 
+// Deduplication: track processed message timestamps (Slack retries with same ts)
+const processedMessages = new Set<string>();
+
 function checkRateLimit(): boolean {
   const today = new Date().toISOString().slice(0, 10);
   if (today !== lastResetDate) {
@@ -59,6 +62,18 @@ async function handleSlackEvent(event: SlackEvent): Promise<Response> {
     return new Response("ok", { status: 200 });
   }
 
+  // Deduplicate: Slack retries if response takes >3s
+  const msgKey = `${msg.channel}-${msg.ts}`;
+  if (processedMessages.has(msgKey)) {
+    return new Response("ok", { status: 200 });
+  }
+  processedMessages.add(msgKey);
+  // Cleanup old entries every 100 messages
+  if (processedMessages.size > 100) {
+    const entries = Array.from(processedMessages);
+    entries.slice(0, 50).forEach(e => processedMessages.delete(e));
+  }
+
   // User allowlist
   const allowedUsers = env.ALLOWED_USER_IDS
     ? env.ALLOWED_USER_IDS.split(",").map((id) => id.trim())
@@ -74,67 +89,71 @@ async function handleSlackEvent(event: SlackEvent): Promise<Response> {
 
   // Rate limit
   if (!checkRateLimit()) {
-    await postSlackMessage(msg.channel, "Rate limit reached (10 issues/day).", [], env.SLACK_BOT_TOKEN);
+    postSlackMessage(msg.channel, "Rate limit reached (10 issues/day).", [], env.SLACK_BOT_TOKEN).catch(console.error);
     return new Response("ok", { status: 200 });
   }
 
-  try {
-    // 1. Classify
-    const classification = await classifyMessage(msg.text, env.ANTHROPIC_API_KEY);
-    console.log(`Classified: ${classification.repo}/${classification.type}/${classification.priority} — ${classification.title}`);
+  // Respond immediately (Slack requires <3s), process in background
+  const channel = msg.channel;
+  const text = msg.text;
+  const user = msg.user;
 
-    // 2. GitHub issue
-    const ghIssue = await createGitHubIssue(
-      {
-        repo: classification.repo,
-        title: classification.title,
-        description: classification.description,
-        type: classification.type,
-        priority: classification.priority,
-        slackUser: msg.user,
-        messageText: msg.text,
-        org: env.GITHUB_ORG,
-      },
-      env.GITHUB_TOKEN
-    );
-    console.log(`GitHub issue created: ${ghIssue.url}`);
+  queueMicrotask(async () => {
+    try {
+      const classification = await classifyMessage(text, env.ANTHROPIC_API_KEY);
+      console.log(`Classified: ${classification.repo}/${classification.type}/${classification.priority} — ${classification.title}`);
 
-    // 3. Linear (optional)
-    let linearResult: { id: string; url: string } | null = null;
-    if (env.LINEAR_API_KEY) {
-      try {
-        linearResult = await createLinearIssue(
-          { title: classification.title, description: classification.description, priority: classification.priority },
-          env.LINEAR_API_KEY
-        );
-      } catch (err) {
-        console.error("Linear failed:", err);
+      const ghIssue = await createGitHubIssue(
+        {
+          repo: classification.repo,
+          title: classification.title,
+          description: classification.description,
+          type: classification.type,
+          priority: classification.priority,
+          slackUser: user,
+          messageText: text,
+          org: env.GITHUB_ORG,
+        },
+        env.GITHUB_TOKEN
+      );
+      console.log(`GitHub issue created: ${ghIssue.url}`);
+
+      let linearResult: { id: string; url: string } | null = null;
+      if (env.LINEAR_API_KEY) {
+        try {
+          linearResult = await createLinearIssue(
+            { title: classification.title, description: classification.description, priority: classification.priority },
+            env.LINEAR_API_KEY
+          );
+        } catch (err) {
+          console.error("Linear failed:", err);
+        }
       }
+
+      const emoji: Record<string, string> = { critical: ":rotating_light:", high: ":red_circle:", medium: ":large_yellow_circle:", low: ":white_circle:" };
+      const blocks: any[] = [
+        { type: "section", text: { type: "mrkdwn", text: `${emoji[classification.priority] || ":white_circle:"} *Issue created*` } },
+        { type: "section", fields: [
+          { type: "mrkdwn", text: `*Repo:*\n\`${classification.repo}\`` },
+          { type: "mrkdwn", text: `*Type:*\n\`${classification.type}\`` },
+          { type: "mrkdwn", text: `*Priority:*\n\`${classification.priority}\`` },
+          { type: "mrkdwn", text: `*GitHub:*\n<${ghIssue.url}|#${ghIssue.number}>` },
+        ]},
+        { type: "section", text: { type: "mrkdwn", text: `*${classification.title}*\n${classification.description}` } },
+      ];
+
+      if (linearResult) {
+        blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: `Linear: <${linearResult.url}|${linearResult.id}>` }] });
+      }
+
+      await postSlackMessage(channel, `Issue #${ghIssue.number} created in ${classification.repo}`, blocks, env.SLACK_BOT_TOKEN);
+    } catch (err) {
+      console.error("Error:", err);
+      await postSlackMessage(channel, `Failed: ${err instanceof Error ? err.message : "Unknown error"}`, [], env.SLACK_BOT_TOKEN).catch(console.error);
     }
+  });
 
-    // 4. Slack confirmation
-    const emoji: Record<string, string> = { critical: ":rotating_light:", high: ":red_circle:", medium: ":large_yellow_circle:", low: ":white_circle:" };
-    const blocks = [
-      { type: "section", text: { type: "mrkdwn", text: `${emoji[classification.priority] || ":white_circle:"} *Issue created*` } },
-      { type: "section", fields: [
-        { type: "mrkdwn", text: `*Repo:*\n\`${classification.repo}\`` },
-        { type: "mrkdwn", text: `*Type:*\n\`${classification.type}\`` },
-        { type: "mrkdwn", text: `*Priority:*\n\`${classification.priority}\`` },
-        { type: "mrkdwn", text: `*GitHub:*\n<${ghIssue.url}|#${ghIssue.number}>` },
-      ]},
-      { type: "section", text: { type: "mrkdwn", text: `*${classification.title}*\n${classification.description}` } },
-    ];
-
-    if (linearResult) {
-      blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: `Linear: <${linearResult.url}|${linearResult.id}>` }] } as any);
-    }
-
-    await postSlackMessage(msg.channel, `Issue #${ghIssue.number} created in ${classification.repo}`, blocks, env.SLACK_BOT_TOKEN);
-  } catch (err) {
-    console.error("Error:", err);
-    await postSlackMessage(msg.channel, `Failed: ${err instanceof Error ? err.message : "Unknown error"}`, [], env.SLACK_BOT_TOKEN);
-  }
-
+  // Return 200 immediately so Slack doesn't retry
   return new Response("ok", { status: 200 });
 }
 
@@ -148,7 +167,7 @@ const server = Bun.serve({
 
     // Health check
     if (url.pathname === "/health") {
-      return new Response(JSON.stringify({ status: "ok", issues_today: issueCount }), {
+      return new Response(JSON.stringify({ status: "ok" }), {
         headers: { "Content-Type": "application/json" },
       });
     }
