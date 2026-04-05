@@ -66,11 +66,22 @@ jobs:
           BRANCH="agent/issue-${ISSUE_NUMBER}"
           git checkout -b "$BRANCH"
 
+      - name: Install dependencies
+        run: |
+          if [ -f bun.lock ] || [ -f bun.lockb ]; then
+            bun install --frozen-lockfile 2>/dev/null || bun install || true
+          elif [ -f package-lock.json ]; then
+            npm ci 2>/dev/null || npm install || true
+          elif [ -f pnpm-lock.yaml ]; then
+            pnpm install --frozen-lockfile 2>/dev/null || true
+          fi
+        continue-on-error: true
+
       - name: Implement (Claude Code)
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          claude_args: "--model claude-haiku-4-5-20251001 --max-turns 15"
+          claude_args: "--model claude-haiku-4-5-20251001 --max-turns 25"
           prompt: |
             Implement this task in the codebase.
 
