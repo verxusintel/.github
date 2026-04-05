@@ -99,6 +99,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           BRANCH="agent/issue-${ISSUE_NUMBER}"
+          # Configure git auth
+          git config user.name "verxus-agent[bot]"
+          git config user.email "agent@verxus.io"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           # Commit any uncommitted changes
           git add -A
           git diff --cached --quiet || git commit -m "agent: implement #${ISSUE_NUMBER}"
