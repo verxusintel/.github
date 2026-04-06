@@ -75,6 +75,58 @@ jobs:
                 : `PR #${process.env.PR_NUMBER} was closed without merge.`
             });
 
+      - name: Update Linear status
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$LINEAR_API_KEY" ]; then
+            echo "LINEAR_API_KEY not set, skipping Linear sync"
+            exit 0
+          fi
+
+          # Get VER-xxx from PR body
+          PR_BODY=$(gh pr view "$PR_NUMBER" --json body --jq '.body' 2>/dev/null || true)
+          VER_ID=$(echo "$PR_BODY" | grep -oP 'VER-\d+' | head -1 || true)
+
+          # Fallback: try the linked issue body
+          if [ -z "$VER_ID" ]; then
+            ISSUE_NUM=$(echo "$BRANCH" | grep -oP 'agent/issue-\K\d+' || true)
+            if [ -n "$ISSUE_NUM" ]; then
+              ISSUE_BODY=$(gh issue view "$ISSUE_NUM" --json body --jq '.body' 2>/dev/null || true)
+              VER_ID=$(echo "$ISSUE_BODY" | grep -oP 'VER-\d+' | head -1 || true)
+            fi
+          fi
+
+          if [ -z "$VER_ID" ]; then
+            echo "No VER-xxx found, skipping Linear sync"
+            exit 0
+          fi
+
+          # Determine target state
+          MERGED="${{ inputs.pr-merged }}"
+          if [ "$MERGED" = "true" ]; then
+            STATE_ID="526fabd3-2ec0-4baf-8a54-676ae21eafcd"
+            STATE_NAME="Done"
+          else
+            STATE_ID="9966a83f-7172-47c1-8531-7f483d0fb8d8"
+            STATE_NAME="Backlog"
+          fi
+
+          # Resolve internal ID
+          INTERNAL=$(curl -s -X POST https://api.linear.app/graphql \
+            -H "Authorization: $LINEAR_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\":\"{ issue(id: \\\"$VER_ID\\\") { id } }\"}" | jq -r '.data.issue.id // empty')
+
+          if [ -n "$INTERNAL" ]; then
+            curl -s -X POST https://api.linear.app/graphql \
+              -H "Authorization: $LINEAR_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d "{\"query\":\"mutation { issueUpdate(id: \\\"$INTERNAL\\\", input: { stateId: \\\"$STATE_ID\\\" }) { success } }\"}" > /dev/null
+            echo "Linear $VER_ID → $STATE_NAME"
+          fi
+
       - name: Notify Slack
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
