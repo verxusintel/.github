@@ -37,6 +37,13 @@ jobs:
           echo "Deleting branch: ${BRANCH}"
           git push origin --delete "${BRANCH}" 2>/dev/null || echo "Branch already deleted"
 
+      - name: Delete preview environment
+        run: |
+          PREVIEW_NAME="preview-pr-${PR_NUMBER}"
+          kubectl delete pod "${PREVIEW_NAME}" -n previews --ignore-not-found=true 2>/dev/null || true
+          kubectl delete svc "${PREVIEW_NAME}" -n previews --ignore-not-found=true 2>/dev/null || true
+          echo "Preview cleanup done for PR #${PR_NUMBER}"
+
       - name: Close linked issue
         uses: actions/github-script@v7
         with:
