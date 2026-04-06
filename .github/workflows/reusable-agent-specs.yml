@@ -32,36 +32,40 @@ jobs:
             echo "should_update=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Update SPECS.md with Opus
+      - name: Setup
         if: steps.check.outputs.should_update == 'true'
-        uses: anthropics/claude-code-action@v1
+        uses: actions/setup-node@v4
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          claude_args: "--model claude-opus-4-6 --max-turns 20"
-          prompt: |
-            You are a documentation agent at VerXus.
+          node-version: 22
 
-            Repo type from env REPO_TYPE.
+      - name: Setup git
+        if: steps.check.outputs.should_update == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "verxus-agent[bot]"
+          git config user.email "agent@verxus.io"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
 
-            Review the latest commit changes and update SPECS.md to reflect the current state.
-            If SPECS.md does not exist, create it.
-
-            SPECS.md should include:
-            - Project overview and purpose
-            - Architecture and directory structure
-            - Key modules and their responsibilities
-            - API endpoints (if applicable)
-            - Environment variables and configuration
-            - Build and deploy instructions
-            - Dependencies and their purposes
-
-            Keep it concise but comprehensive. Only update sections affected by recent changes.
+      - name: Update SPECS.md (Haiku)
+        if: steps.check.outputs.should_update == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | head -20)
+          npx --yes @anthropic-ai/claude-code@latest -p \
+            "Update SPECS.md to reflect recent changes. Changed files: ${CHANGED}. Read the current SPECS.md and the changed files. ADD new deps/modules/routes, UPDATE changed versions/descriptions, REMOVE deleted items. Keep same format. Only change sections affected by the commit. If nothing meaningful changed, do nothing." \
+            --model claude-haiku-4-5-20251001 \
+            --max-turns 10 \
+            --dangerously-skip-permissions
 
       - name: Commit SPECS.md
         if: steps.check.outputs.should_update == 'true'
         run: |
           git add SPECS.md
           if ! git diff --cached --quiet; then
-            git commit -m "agent: update SPECS.md"
+            git commit -m "docs(specs): auto-update SPECS.md
+
+Co-Authored-By: Claude Haiku 4.5 <noreply@anthropic.com>"
             git push
           fi

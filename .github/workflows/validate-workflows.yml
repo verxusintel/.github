@@ -7,7 +7,7 @@ on:
 
 jobs:
   validate:
-    runs-on: self-hosted
+    runs-on: agent-runner
     steps:
       - uses: actions/checkout@v4
 
