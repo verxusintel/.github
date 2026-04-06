@@ -10,11 +10,14 @@ export interface Env {
 }
 
 export interface Classification {
+  mode: "code" | "product";
   repo: string;
   type: "bug" | "feature" | "improvement" | "security" | "performance";
   priority: "critical" | "high" | "medium" | "low";
   title: string;
   description: string;
+  user_stories?: string[];
+  acceptance_criteria?: string[];
 }
 
 export interface SlackEvent {

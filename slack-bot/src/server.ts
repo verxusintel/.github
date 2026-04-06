@@ -113,10 +113,13 @@ async function handleSlackEvent(event: SlackEvent): Promise<Response> {
           slackUser: user,
           messageText: text,
           org: env.GITHUB_ORG,
+          mode: classification.mode || "code",
+          user_stories: classification.user_stories,
+          acceptance_criteria: classification.acceptance_criteria,
         },
         env.GITHUB_TOKEN
       );
-      console.log(`GitHub issue created: ${ghIssue.url}`);
+      console.log(`GitHub issue created (${classification.mode}): ${ghIssue.url}`);
 
       let linearResult: { id: string; url: string } | null = null;
       if (env.LINEAR_API_KEY) {
@@ -132,8 +135,9 @@ async function handleSlackEvent(event: SlackEvent): Promise<Response> {
       }
 
       const emoji: Record<string, string> = { critical: ":rotating_light:", high: ":red_circle:", medium: ":large_yellow_circle:", low: ":white_circle:" };
+      const modeLabel = classification.mode === "product" ? ":memo: *Product spec created*" : ":gear: *Code issue created*";
       const blocks: any[] = [
-        { type: "section", text: { type: "mrkdwn", text: `${emoji[classification.priority] || ":white_circle:"} *Issue created*` } },
+        { type: "section", text: { type: "mrkdwn", text: `${emoji[classification.priority] || ":white_circle:"} ${modeLabel}` } },
         { type: "section", fields: [
           { type: "mrkdwn", text: `*Repo:*\n\`${classification.repo}\`` },
           { type: "mrkdwn", text: `*Type:*\n\`${classification.type}\`` },
@@ -142,6 +146,13 @@ async function handleSlackEvent(event: SlackEvent): Promise<Response> {
         ]},
         { type: "section", text: { type: "mrkdwn", text: `*${classification.title}*\n${classification.description}` } },
       ];
+
+      if (classification.mode === "product" && classification.user_stories?.length) {
+        blocks.push({
+          type: "section",
+          text: { type: "mrkdwn", text: `*User Stories:*\n${classification.user_stories.map(s => `• ${s}`).join('\n')}` }
+        });
+      }
 
       if (linearResult) {
         blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: `Linear: <${linearResult.url}|${linearResult.id}>` }] });
