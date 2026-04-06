@@ -66,6 +66,11 @@ jobs:
           BRANCH="agent/issue-${ISSUE_NUMBER}"
           git checkout -b "$BRANCH"
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Install dependencies
         run: |
           if [ -f bun.lock ] || [ -f bun.lockb ]; then
