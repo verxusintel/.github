@@ -106,7 +106,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           BRANCH="agent/issue-${ISSUE_NUMBER}"
+          # Don't commit lockfiles or node_modules changes
+          git checkout -- package-lock.json 2>/dev/null || true
+          git checkout -- pnpm-lock.yaml 2>/dev/null || true
+          git checkout -- bun.lock 2>/dev/null || true
+          git checkout -- bun.lockb 2>/dev/null || true
           git add -A
+          git reset HEAD -- node_modules/ 2>/dev/null || true
           git diff --cached --quiet || git commit -m "agent: implement #${ISSUE_NUMBER}"
           git push origin "$BRANCH"
           # Create PR
