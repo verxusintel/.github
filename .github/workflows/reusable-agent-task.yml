@@ -103,7 +103,13 @@ jobs:
             - NEVER write destructive DB migrations (DROP, DELETE, TRUNCATE)
             - NEVER log PII (emails, IPs, credentials)
             - Use exact dependency versions (no ^ or ~)
-            - Commit your changes with message: "agent: implement #${{ env.ISSUE_NUMBER }}"
+
+            ## CRITICAL: You MUST commit and push your changes
+            After making changes, run these commands:
+            1. git add -A
+            2. git commit -m "agent: implement #${{ env.ISSUE_NUMBER }}"
+            3. git push origin agent/issue-${{ env.ISSUE_NUMBER }}
+            DO NOT skip these steps. The pipeline depends on your commit being pushed.
 
       - name: Push and create PR
         env:
