@@ -114,3 +114,117 @@ export async function classifyMessage(
 
   return classification;
 }
+
+const REVISE_SYSTEM_PROMPT = `You are revising an existing GitHub issue based on a user correction.
+
+You will receive:
+- The ORIGINAL issue (title + description)
+- A CORRECTION message from the user describing what should change (fix wrong info, add context, change priority, etc.)
+
+Produce an UPDATED version of the issue reflecting the correction. Preserve anything the user didn't ask to change.
+
+Return ONLY valid JSON:
+{
+  "mode": "code" | "product",
+  "repo": "api" | "frontend" | "social-service" | "telegram-service",
+  "type": "bug" | "feature" | "improvement" | "security" | "performance",
+  "priority": "critical" | "high" | "medium" | "low",
+  "title": "<updated short title, under 70 characters>",
+  "description": "<updated description, 2-4 sentences>",
+  "user_stories": ["As a...", "..."],
+  "acceptance_criteria": ["...", "..."]
+}
+
+No markdown, no code fences. Only the JSON object.`;
+
+export async function reviseClassification(
+  original: { title: string; description: string; repo: string; mode: "code" | "product" },
+  correction: string,
+  apiKey: string
+): Promise<Classification> {
+  const userContent = [
+    `ORIGINAL ISSUE (repo: ${original.repo}, mode: ${original.mode}):`,
+    `Title: ${original.title}`,
+    `Description: ${original.description}`,
+    ``,
+    `USER CORRECTION:`,
+    correction,
+  ].join("\n");
+
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 512,
+      system: REVISE_SYSTEM_PROMPT,
+      messages: [{ role: "user", content: userContent }],
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Anthropic API error (${response.status}): ${errorText}`);
+  }
+
+  const data = (await response.json()) as { content: Array<{ type: string; text: string }> };
+  const rawText = data.content?.[0]?.text;
+  if (!rawText) throw new Error("Empty response from Anthropic API");
+
+  const text = rawText.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
+  const classification = JSON.parse(text) as Classification;
+
+  const validRepos = ["api", "frontend", "social-service", "telegram-service"];
+  const validTypes = ["bug", "feature", "improvement", "security", "performance"];
+  const validPriorities = ["critical", "high", "medium", "low"];
+
+  if (!validRepos.includes(classification.repo)) throw new Error(`Invalid repo: ${classification.repo}`);
+  if (!validTypes.includes(classification.type)) throw new Error(`Invalid type: ${classification.type}`);
+  if (!validPriorities.includes(classification.priority)) throw new Error(`Invalid priority: ${classification.priority}`);
+  if (!classification.title || classification.title.length > 70) throw new Error("Title missing or >70 chars");
+  if (!classification.description) throw new Error("Description missing");
+
+  return classification;
+}
+
+/**
+ * Detect whether the user is asking to revise a previously created issue.
+ * Returns the referenced issue number, or null (use lastIssuePerUser).
+ */
+export function detectRevisionIntent(text: string): { isRevision: boolean; issueNumber: number | null } {
+  const lower = text.toLowerCase();
+  const reviseKeywords = [
+    "mandei errado",
+    "enviei errado",
+    "revise",
+    "revisa",
+    "revisar",
+    "corrige",
+    "corrija",
+    "corrigir",
+    "atualize",
+    "atualiza",
+    "atualizar",
+    "edite",
+    "edita",
+    "editar",
+    "update the issue",
+    "edit the issue",
+    "fix the issue",
+    "wrong issue",
+  ];
+  const hasKeyword = reviseKeywords.some(k => lower.includes(k));
+
+  // Explicit #123 reference
+  const match = text.match(/#(\d+)/);
+  const issueNumber = match ? parseInt(match[1], 10) : null;
+
+  return {
+    isRevision: hasKeyword || (issueNumber !== null && /\b(issue|issu)\b/i.test(text)),
+    issueNumber,
+  };
+}

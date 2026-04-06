@@ -1,7 +1,7 @@
 import type { Env, SlackEvent } from "./types";
 import { verifySlackSignature, postSlackMessage } from "./slack";
-import { classifyMessage } from "./classifier";
-import { createGitHubIssue } from "./github";
+import { classifyMessage, reviseClassification, detectRevisionIntent } from "./classifier";
+import { createGitHubIssue, getGitHubIssue, updateGitHubIssue } from "./github";
 import { createLinearIssue } from "./linear";
 
 // Rate limiter
@@ -11,6 +11,19 @@ let lastResetDate = "";
 
 // Deduplication: track processed message timestamps (Slack retries with same ts)
 const processedMessages = new Set<string>();
+
+// Track the last issue created per Slack user, so "revise the last issue" works
+// without the user having to paste the number.
+interface LastIssueRecord {
+  org: string;
+  repo: string;
+  number: number;
+  url: string;
+  mode: "code" | "product";
+  createdAt: number;
+}
+const lastIssuePerUser = new Map<string, LastIssueRecord>();
+const REVISION_WINDOW_MS = 30 * 60 * 1000; // 30 min
 
 function checkRateLimit(): boolean {
   const today = new Date().toISOString().slice(0, 10);
@@ -100,6 +113,102 @@ async function handleSlackEvent(event: SlackEvent): Promise<Response> {
 
   queueMicrotask(async () => {
     try {
+      // Check if the user is asking to revise an existing issue rather than create a new one
+      const intent = detectRevisionIntent(text);
+      const lastIssue = lastIssuePerUser.get(user);
+      const lastFresh = lastIssue && Date.now() - lastIssue.createdAt < REVISION_WINDOW_MS;
+
+      let targetRevision: { org: string; repo: string; number: number } | null = null;
+      if (intent.isRevision) {
+        if (intent.issueNumber && lastFresh && lastIssue!.number === intent.issueNumber) {
+          targetRevision = { org: lastIssue!.org, repo: lastIssue!.repo, number: intent.issueNumber };
+        } else if (intent.issueNumber && lastFresh) {
+          // Explicit #N, use the last known repo as best guess
+          targetRevision = { org: lastIssue!.org, repo: lastIssue!.repo, number: intent.issueNumber };
+        } else if (!intent.issueNumber && lastFresh) {
+          // "revise a última" sem número
+          targetRevision = { org: lastIssue!.org, repo: lastIssue!.repo, number: lastIssue!.number };
+        }
+      }
+
+      if (targetRevision) {
+        console.log(`Revision intent detected → updating ${targetRevision.repo}#${targetRevision.number}`);
+        const existing = await getGitHubIssue(
+          targetRevision.org,
+          targetRevision.repo,
+          targetRevision.number,
+          env.GITHUB_TOKEN
+        );
+
+        // Strip our own metadata footer to get the clean description for the LLM
+        const cleanDescription = existing.body
+          .split(/\n---\n/)[0]
+          .replace(/^## .*\n\n?/, "")
+          .trim();
+
+        const revised = await reviseClassification(
+          {
+            title: existing.title,
+            description: cleanDescription,
+            repo: targetRevision.repo,
+            mode: (lastIssue?.mode || "code"),
+          },
+          text,
+          env.ANTHROPIC_API_KEY
+        );
+        console.log(`Revised: ${revised.type}/${revised.priority} — ${revised.title}`);
+
+        const updated = await updateGitHubIssue(
+          {
+            org: targetRevision.org,
+            repo: targetRevision.repo,
+            number: targetRevision.number,
+            title: revised.title,
+            description: revised.description,
+            type: revised.type,
+            priority: revised.priority,
+            slackUser: user,
+            messageText: text,
+            mode: revised.mode || "code",
+            user_stories: revised.user_stories,
+            acceptance_criteria: revised.acceptance_criteria,
+            previousLabels: existing.labels,
+          },
+          env.GITHUB_TOKEN
+        );
+
+        // Refresh last-issue record
+        lastIssuePerUser.set(user, {
+          org: targetRevision.org,
+          repo: targetRevision.repo,
+          number: updated.number,
+          url: updated.url,
+          mode: revised.mode || "code",
+          createdAt: Date.now(),
+        });
+
+        const emojiR: Record<string, string> = { critical: ":rotating_light:", high: ":red_circle:", medium: ":large_yellow_circle:", low: ":white_circle:" };
+        const modeLabelR = revised.mode === "product" ? ":memo: *Product spec updated*" : ":gear: *Code issue updated*";
+        const blocksR: any[] = [
+          { type: "section", text: { type: "mrkdwn", text: `${emojiR[revised.priority] || ":white_circle:"} ${modeLabelR}` } },
+          { type: "section", fields: [
+            { type: "mrkdwn", text: `*Repo:*\n\`${targetRevision.repo}\`` },
+            { type: "mrkdwn", text: `*Type:*\n\`${revised.type}\`` },
+            { type: "mrkdwn", text: `*Priority:*\n\`${revised.priority}\`` },
+            { type: "mrkdwn", text: `*GitHub:*\n<${updated.url}|#${updated.number}>` },
+          ]},
+          { type: "section", text: { type: "mrkdwn", text: `*${revised.title}*\n${revised.description}` } },
+        ];
+
+        await postSlackMessage(
+          channel,
+          `Issue #${updated.number} updated in ${targetRevision.repo}`,
+          blocksR,
+          env.SLACK_BOT_TOKEN
+        );
+        return;
+      }
+
       const classification = await classifyMessage(text, env.ANTHROPIC_API_KEY);
       console.log(`Classified: ${classification.repo}/${classification.type}/${classification.priority} — ${classification.title}`);
 
@@ -120,6 +229,16 @@ async function handleSlackEvent(event: SlackEvent): Promise<Response> {
         env.GITHUB_TOKEN
       );
       console.log(`GitHub issue created (${classification.mode}): ${ghIssue.url}`);
+
+      // Remember this as the user's last issue, so a follow-up "revise" works
+      lastIssuePerUser.set(user, {
+        org: env.GITHUB_ORG,
+        repo: classification.repo,
+        number: ghIssue.number,
+        url: ghIssue.url,
+        mode: classification.mode || "code",
+        createdAt: Date.now(),
+      });
 
       let linearResult: { id: string; url: string } | null = null;
       if (env.LINEAR_API_KEY) {
