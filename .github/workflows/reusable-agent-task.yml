@@ -77,53 +77,32 @@ jobs:
           fi
         continue-on-error: true
 
-      - name: Implement (Claude Code)
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          claude_args: "--model claude-haiku-4-5-20251001 --max-turns 25"
-          prompt: |
-            Implement this task in the codebase.
+      - name: Setup git auth
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "verxus-agent[bot]"
+          git config user.email "agent@verxus.io"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
 
-            ## Issue
-            Title: ${{ env.ISSUE_TITLE }}
-            Body: ${{ env.ISSUE_BODY }}
+      - name: Implement (Claude CLI)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          npx --yes @anthropic-ai/claude-code@latest -p \
+            "Implement this task. Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}. ${ISSUE_BODY}. Repo type: ${REPO_TYPE}. Build: ${BUILD_CMD}. Test: ${TEST_CMD}. Forbidden: ${FORBIDDEN_PATHS}. Read SPECS.md first. Make minimal changes. Run build to verify. NEVER modify forbidden files. NEVER destructive migrations. NEVER log PII. Use exact dep versions." \
+            --model claude-haiku-4-5-20251001 \
+            --max-turns 25 \
+            --allowedTools "Bash(git:*)" "Bash(npm:*)" "Bash(npx:*)" "Bash(bun:*)" "Bash(node:*)" "Read" "Write" "Edit" "Glob" "Grep" \
+            --dangerously-skip-permissions
 
-            ## Context
-            Repo type: ${{ env.REPO_TYPE }}
-            Build: ${{ env.BUILD_CMD }}
-            Test: ${{ env.TEST_CMD }}
-            Forbidden files: ${{ env.FORBIDDEN_PATHS }}
-
-            ## Rules
-            - Read SPECS.md first for project context
-            - Make focused, minimal changes
-            - Run the build command to verify before finishing
-            - NEVER modify forbidden files
-            - NEVER write destructive DB migrations (DROP, DELETE, TRUNCATE)
-            - NEVER log PII (emails, IPs, credentials)
-            - Use exact dependency versions (no ^ or ~)
-
-            ## CRITICAL: You MUST commit and push your changes
-            After making changes, run these commands:
-            1. git add -A
-            2. git commit -m "agent: implement #${{ env.ISSUE_NUMBER }}"
-            3. git push origin agent/issue-${{ env.ISSUE_NUMBER }}
-            DO NOT skip these steps. The pipeline depends on your commit being pushed.
-
-      - name: Push and create PR
+      - name: Commit and push
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           BRANCH="agent/issue-${ISSUE_NUMBER}"
-          # Configure git auth
-          git config user.name "verxus-agent[bot]"
-          git config user.email "agent@verxus.io"
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
-          # Commit any uncommitted changes
           git add -A
           git diff --cached --quiet || git commit -m "agent: implement #${ISSUE_NUMBER}"
-          # Push
           git push origin "$BRANCH"
           # Create PR
           gh pr create \
